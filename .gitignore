@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+*.log
+.DS_Store
+uploads/*
+!uploads/.gitkeep
+backend/.pgdata
+backend/data
+frontend/dist
+coverage
+.vite

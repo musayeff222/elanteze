@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: alver
+      POSTGRES_PASSWORD: alver
+      POSTGRES_DB: alver
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alver -d alver"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://alver:alver@postgres:5432/alver?schema=public
+      JWT_ACCESS_SECRET: alver-docker-access-secret-change-me-32
+      JWT_REFRESH_SECRET: alver-docker-refresh-secret-change-me-32
+      CORS_ORIGIN: http://localhost:8080
+      FRONTEND_URL: http://localhost:8080
+      UPLOAD_DIR: uploads
+      SEED_ON_START: "true"
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:
