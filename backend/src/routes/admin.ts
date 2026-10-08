@@ -3,7 +3,7 @@ import { Router } from "express";
 import { config } from "../config";
 import { HttpError } from "../lib/errors";
 import { prisma } from "../lib/prisma";
-import { slugify, sanitizeText } from "../lib/text";
+import { foldAz, slugify, sanitizeText } from "../lib/text";
 import { asyncHandler } from "../middleware/asyncHandler";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { validate } from "../middleware/validate";
@@ -11,7 +11,7 @@ import { bannerSchema, categorySchema, rejectSchema, reportAdminSchema, settings
 import { audit, notify } from "../services/notify";
 import { DEFAULT_SETTINGS, getSettings } from "../services/settings";
 import { favoriteInclude } from "../services/listings";
-import { ListingRecord, serializeListing } from "../services/serialize";
+import { ListingRecord, listingInclude, serializeListing } from "../services/serialize";
 
 export const adminRouter = Router();
 
@@ -70,11 +70,30 @@ adminRouter.get(
       return days.map((date) => ({ date, count: map[date] }));
     };
 
-    const recentAudit = await prisma.auditLog.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 8,
-      include: { actor: { select: { firstName: true, lastName: true } } },
-    });
+    const [recentAudit, latestListings, latestReports, latestPeople] = await Promise.all([
+      prisma.auditLog.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 8,
+        include: { actor: { select: { firstName: true, lastName: true } } },
+      }),
+      prisma.listing.findMany({
+        where: { status: { not: "DELETED" } },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { id: true, title: true, slug: true, status: true, price: true, createdAt: true },
+      }),
+      prisma.report.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        include: { listing: { select: { title: true, slug: true } } },
+      }),
+      prisma.user.findMany({
+        where: { deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { id: true, firstName: true, lastName: true, email: true, role: true, createdAt: true },
+      }),
+    ]);
 
     res.json({
       usersTotal,
@@ -89,7 +108,21 @@ adminRouter.get(
       usersByDay: bucket(recentUsers),
       listingsByCategory: byCategory.map((item) => ({ name: item.name, count: item._count.listings })),
       recentAudit,
+      latestListings: latestListings.map((item) => ({ ...item, price: Number(item.price) })),
+      latestReports,
+      latestPeople,
     });
+  }),
+);
+
+adminRouter.get(
+  "/badges",
+  asyncHandler(async (_req, res) => {
+    const [pending, reports] = await Promise.all([
+      prisma.listing.count({ where: { status: "PENDING" } }),
+      prisma.report.count({ where: { status: { in: ["OPEN", "REVIEWING"] } } }),
+    ]);
+    res.json({ pending, reports });
   }),
 );
 
@@ -233,39 +266,169 @@ adminRouter.delete(
   }),
 );
 
+const LISTING_STATUSES: ListingStatus[] = ["PENDING", "ACTIVE", "REJECTED", "HIDDEN", "SOLD", "EXPIRED", "DELETED"];
+
 adminRouter.get(
   "/listings",
   asyncHandler(async (req, res) => {
-    const status = typeof req.query.status === "string" ? (req.query.status as ListingStatus) : undefined;
+    const statusRaw = typeof req.query.status === "string" ? req.query.status : "";
+    const status = LISTING_STATUSES.includes(statusRaw as ListingStatus) ? (statusRaw as ListingStatus) : undefined;
     const q = String(req.query.q || "").trim();
+    const category = typeof req.query.category === "string" ? req.query.category : "";
+    const city = typeof req.query.city === "string" ? req.query.city : "";
+    const featured = req.query.featured === "1";
+    const sort = String(req.query.sort || "new");
     const page = Math.max(1, Number(req.query.page || 1));
-    const limit = 20;
+    const limit = 12;
     const where: Prisma.ListingWhereInput = {};
-    if (status) where.status = status;
-    else where.status = { not: "DELETED" };
+    if (featured) where.isFeatured = true;
+    if (category) where.category = { OR: [{ id: category }, { slug: category }] };
+    if (city) where.city = { OR: [{ id: city }, { slug: city }] };
     if (q) {
-      where.OR = [
-        { title: { contains: q, mode: "insensitive" } },
-        { slug: { contains: q, mode: "insensitive" } },
-        { user: { email: { contains: q, mode: "insensitive" } } },
+      const asNumber = Number(q.replace(/^#/, ""));
+      const folded = foldAz(q);
+      where.AND = [
+        {
+          OR: [
+            { title: { contains: q, mode: "insensitive" } },
+            { searchText: { contains: folded } },
+            { brand: { contains: q, mode: "insensitive" } },
+            { user: { email: { contains: q, mode: "insensitive" } } },
+            { user: { firstName: { contains: q, mode: "insensitive" } } },
+            { user: { lastName: { contains: q, mode: "insensitive" } } },
+            ...(Number.isInteger(asNumber) && asNumber > 0 ? [{ publicNumber: asNumber }] : []),
+          ],
+        },
       ];
     }
-    const [total, rows] = await prisma.$transaction([
+    const countedWhere: Prisma.ListingWhereInput = { ...where };
+    if (status) where.status = status;
+    const orderBy: Prisma.ListingOrderByWithRelationInput =
+      sort === "price-asc" ? { price: "asc" } : sort === "price-desc" ? { price: "desc" } : sort === "views" ? { viewCount: "desc" } : { createdAt: "desc" };
+    const [total, rows, grouped] = await prisma.$transaction([
       prisma.listing.count({ where }),
       prisma.listing.findMany({
         where,
-        include: favoriteInclude(undefined),
-        orderBy: { createdAt: "desc" },
+        include: {
+          ...favoriteInclude(undefined),
+          _count: { select: { reports: true, conversations: true, offers: true } },
+        },
+        orderBy,
         skip: (page - 1) * limit,
         take: limit,
       }),
+      prisma.listing.groupBy({ by: ["status"], where: countedWhere, _count: { _all: true }, orderBy: { status: "asc" } }),
     ]);
+    const counts: Record<string, number> = {};
+    for (const item of grouped) {
+      const raw = item._count;
+      counts[item.status] = raw && typeof raw === "object" ? raw._all || 0 : 0;
+    }
     res.json({
-      items: rows.map((row) => serializeListing(row as ListingRecord, { showPhone: true, ownerView: true })),
+      items: rows.map((row) => ({
+        ...serializeListing(row as ListingRecord, { showPhone: true, ownerView: true }),
+        reports: row._count.reports,
+        conversations: row._count.conversations,
+        offers: row._count.offers,
+      })),
       total,
       page,
       pages: Math.max(1, Math.ceil(total / limit)),
+      counts,
     });
+  }),
+);
+
+adminRouter.get(
+  "/listings/:id",
+  asyncHandler(async (req, res) => {
+    const listing = await prisma.listing.findUnique({
+      where: { id: req.params.id },
+      include: {
+        ...listingInclude,
+        favorites: { where: { userId: "__none__" }, select: { userId: true } },
+        reports: {
+          orderBy: { createdAt: "desc" },
+          take: 12,
+          include: { reporter: { select: { firstName: true, lastName: true } } },
+        },
+        _count: { select: { reports: true, conversations: true, offers: true, favorites: true } },
+      },
+    });
+    if (!listing) throw new HttpError(404, "Elan tapılmadı");
+    res.json({
+      listing: serializeListing(listing as ListingRecord, { showPhone: true, ownerView: true }),
+      reports: listing.reports.map((report) => ({
+        id: report.id,
+        reason: report.reason,
+        details: report.details,
+        status: report.status,
+        createdAt: report.createdAt,
+        reporter: report.reporter,
+      })),
+      counts: listing._count,
+    });
+  }),
+);
+
+adminRouter.post(
+  "/listings/bulk",
+  asyncHandler(async (req, res) => {
+    const ids = Array.isArray(req.body.ids) ? (req.body.ids as string[]) : [];
+    const action = String(req.body.action || "");
+    if (!ids.length || ids.length > 50) throw new HttpError(400, "Ən çox 50 elan seçin");
+    if (!["approve", "hide", "feature", "unfeature", "sold", "restore", "reject"].includes(action)) {
+      throw new HttpError(400, "Əməliyyat tanınmadı");
+    }
+    const reason = sanitizeText(String(req.body.reason || ""));
+    if (action === "reject" && reason.length < 3) throw new HttpError(400, "Rədd səbəbini yazın");
+    const listings = await prisma.listing.findMany({ where: { id: { in: ids } } });
+    for (const listing of listings) {
+      if (action === "approve" || action === "restore") {
+        const updated = await prisma.listing.update({
+          where: { id: listing.id },
+          data: {
+            status: "ACTIVE",
+            rejectionReason: null,
+            expiresAt: new Date(Date.now() + config.listingTtlDays * 24 * 60 * 60 * 1000),
+            expiryNotified: false,
+          },
+        });
+        if (action === "approve") {
+          await notify({
+            userId: listing.userId,
+            type: "LISTING_APPROVED",
+            title: "Elan təsdiqləndi",
+            body: `${listing.title} elanı yayımlandı.`,
+            link: `/elan/${updated.slug}`,
+          });
+        }
+      } else if (action === "hide") {
+        await prisma.listing.update({ where: { id: listing.id }, data: { status: "HIDDEN" } });
+      } else if (action === "feature") {
+        await prisma.listing.update({ where: { id: listing.id }, data: { isFeatured: true } });
+      } else if (action === "unfeature") {
+        await prisma.listing.update({ where: { id: listing.id }, data: { isFeatured: false } });
+      } else if (action === "sold") {
+        await prisma.listing.update({ where: { id: listing.id }, data: { status: "SOLD", soldAt: new Date() } });
+      } else if (action === "reject") {
+        await prisma.listing.update({ where: { id: listing.id }, data: { status: "REJECTED", rejectionReason: reason } });
+        await notify({
+          userId: listing.userId,
+          type: "LISTING_REJECTED",
+          title: "Elan rədd edildi",
+          body: `${listing.title}: ${reason}`,
+          link: "/hesab",
+        });
+      }
+    }
+    await audit({
+      actorId: req.user!.id,
+      action: "LISTING_BULK",
+      entity: "Listing",
+      meta: { action, count: listings.length },
+    });
+    res.json({ message: `${listings.length} elan yeniləndi` });
   }),
 );
 
@@ -602,5 +765,204 @@ adminRouter.delete(
   asyncHandler(async (req, res) => {
     await prisma.banner.delete({ where: { id: req.params.id } });
     res.json({ message: "Banner silindi" });
+  }),
+);
+
+adminRouter.get(
+  "/cities",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (_req, res) => {
+    const items = await prisma.city.findMany({
+      orderBy: { sortOrder: "asc" },
+      include: {
+        districts: { orderBy: { name: "asc" } },
+        _count: { select: { listings: true } },
+      },
+    });
+    res.json({ items });
+  }),
+);
+
+adminRouter.post(
+  "/cities",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (req, res) => {
+    const name = sanitizeText(String(req.body.name || ""));
+    if (name.length < 2) throw new HttpError(400, "Şəhər adını yazın");
+    let slug = slugify(name);
+    let index = 2;
+    while (await prisma.city.findUnique({ where: { slug } })) {
+      slug = `${slugify(name)}-${index}`;
+      index += 1;
+    }
+    const city = await prisma.city.create({
+      data: { name, slug, sortOrder: Number(req.body.sortOrder || 0) },
+    });
+    await audit({ actorId: req.user!.id, action: "CITY_CREATE", entity: "City", entityId: city.id });
+    res.status(201).json({ message: "Şəhər əlavə edildi", city });
+  }),
+);
+
+adminRouter.patch(
+  "/cities/:id",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (req, res) => {
+    const name = req.body.name ? sanitizeText(String(req.body.name)) : undefined;
+    const city = await prisma.city.update({
+      where: { id: req.params.id },
+      data: {
+        name,
+        sortOrder: req.body.sortOrder === undefined ? undefined : Number(req.body.sortOrder),
+      },
+    });
+    await audit({ actorId: req.user!.id, action: "CITY_UPDATE", entity: "City", entityId: city.id });
+    res.json({ message: "Şəhər yeniləndi", city });
+  }),
+);
+
+adminRouter.delete(
+  "/cities/:id",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (req, res) => {
+    const [listings, users, districts] = await Promise.all([
+      prisma.listing.count({ where: { cityId: req.params.id } }),
+      prisma.user.count({ where: { cityId: req.params.id } }),
+      prisma.district.count({ where: { cityId: req.params.id } }),
+    ]);
+    if (listings || users || districts) throw new HttpError(400, "Bu şəhərdə elan, istifadəçi və ya rayon var");
+    await prisma.city.delete({ where: { id: req.params.id } });
+    await audit({ actorId: req.user!.id, action: "CITY_DELETE", entity: "City", entityId: req.params.id });
+    res.json({ message: "Şəhər silindi" });
+  }),
+);
+
+adminRouter.post(
+  "/cities/:id/districts",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (req, res) => {
+    const name = sanitizeText(String(req.body.name || ""));
+    if (name.length < 2) throw new HttpError(400, "Rayon adını yazın");
+    const city = await prisma.city.findUnique({ where: { id: req.params.id } });
+    if (!city) throw new HttpError(404, "Şəhər tapılmadı");
+    let slug = slugify(name);
+    let index = 2;
+    while (await prisma.district.findUnique({ where: { cityId_slug: { cityId: city.id, slug } } })) {
+      slug = `${slugify(name)}-${index}`;
+      index += 1;
+    }
+    const district = await prisma.district.create({ data: { name, slug, cityId: city.id } });
+    await audit({ actorId: req.user!.id, action: "DISTRICT_CREATE", entity: "District", entityId: district.id });
+    res.status(201).json({ message: "Rayon əlavə edildi", district });
+  }),
+);
+
+adminRouter.delete(
+  "/districts/:id",
+  requireRole("ADMIN", "SUPER_ADMIN"),
+  asyncHandler(async (req, res) => {
+    const listings = await prisma.listing.count({ where: { districtId: req.params.id } });
+    if (listings) throw new HttpError(400, "Bu rayonda elan var");
+    await prisma.district.delete({ where: { id: req.params.id } });
+    await audit({ actorId: req.user!.id, action: "DISTRICT_DELETE", entity: "District", entityId: req.params.id });
+    res.json({ message: "Rayon silindi" });
+  }),
+);
+
+adminRouter.get(
+  "/conversations",
+  asyncHandler(async (req, res) => {
+    const q = String(req.query.q || "").trim();
+    const items = await prisma.conversation.findMany({
+      where: q
+        ? {
+            OR: [
+              { listing: { title: { contains: q, mode: "insensitive" } } },
+              { buyer: { firstName: { contains: q, mode: "insensitive" } } },
+              { seller: { firstName: { contains: q, mode: "insensitive" } } },
+            ],
+          }
+        : undefined,
+      include: {
+        listing: { select: { id: true, title: true, slug: true, price: true } },
+        buyer: { select: { id: true, firstName: true, lastName: true } },
+        seller: { select: { id: true, firstName: true, lastName: true } },
+        messages: { orderBy: { createdAt: "desc" }, take: 1 },
+        _count: { select: { messages: true } },
+      },
+      orderBy: { lastMessageAt: "desc" },
+      take: 80,
+    });
+    res.json({
+      items: items.map((item) => ({
+        ...item,
+        listing: { ...item.listing, price: Number(item.listing.price) },
+      })),
+    });
+  }),
+);
+
+adminRouter.get(
+  "/conversations/:id",
+  asyncHandler(async (req, res) => {
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: req.params.id },
+      include: {
+        listing: { select: { id: true, title: true, slug: true, price: true } },
+        buyer: { select: { id: true, firstName: true, lastName: true, email: true } },
+        seller: { select: { id: true, firstName: true, lastName: true, email: true } },
+        messages: { orderBy: { createdAt: "asc" }, take: 200, include: { sender: { select: { firstName: true, lastName: true } } } },
+      },
+    });
+    if (!conversation) throw new HttpError(404, "Yazışma tapılmadı");
+    res.json({
+      conversation: {
+        ...conversation,
+        listing: { ...conversation.listing, price: Number(conversation.listing.price) },
+      },
+    });
+  }),
+);
+
+adminRouter.get(
+  "/offers",
+  asyncHandler(async (_req, res) => {
+    const items = await prisma.offer.findMany({
+      include: {
+        listing: { select: { id: true, title: true, slug: true, price: true } },
+        buyer: { select: { id: true, firstName: true, lastName: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 80,
+    });
+    res.json({
+      items: items.map((item) => ({
+        ...item,
+        amount: Number(item.amount),
+        listing: { ...item.listing, price: Number(item.listing.price) },
+      })),
+    });
+  }),
+);
+
+adminRouter.get(
+  "/audit",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = 30;
+    const q = String(req.query.q || "").trim();
+    const where: Prisma.AuditLogWhereInput = q
+      ? { OR: [{ action: { contains: q, mode: "insensitive" } }, { entity: { contains: q, mode: "insensitive" } }] }
+      : {};
+    const [total, items] = await prisma.$transaction([
+      prisma.auditLog.count({ where }),
+      prisma.auditLog.findMany({
+        where,
+        include: { actor: { select: { firstName: true, lastName: true } } },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+    res.json({ items, total, page, pages: Math.max(1, Math.ceil(total / limit)) });
   }),
 );

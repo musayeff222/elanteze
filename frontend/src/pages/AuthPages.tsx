@@ -16,9 +16,8 @@ export function LoginPage() {
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     try {
-      const logged = await login(email, password);
-      const staff = ["MODERATOR", "ADMIN", "SUPER_ADMIN"].includes(logged.role || "");
-      navigate(params.get("next") || (staff ? "/admin" : "/"));
+      await login(email, password);
+      navigate(params.get("next") || "/");
     } catch (error) {
       push(error instanceof Error ? error.message : "Giriş alınmadı");
     }

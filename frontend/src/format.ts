@@ -3,9 +3,13 @@ export function formatPrice(value: number) {
   return `${new Intl.NumberFormat("az-AZ").format(value)} ₼`;
 }
 
+const azMonths = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avqust", "sentyabr", "oktyabr", "noyabr", "dekabr"];
+
 export function formatDate(value?: string | null) {
   if (!value) return "";
-  return new Intl.DateTimeFormat("az-AZ", { day: "numeric", month: "long", year: "numeric" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getDate()} ${azMonths[date.getMonth()]} ${date.getFullYear()}`;
 }
 
 export function formatWhen(value?: string | null) {

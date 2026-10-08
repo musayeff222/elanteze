@@ -1,7 +1,24 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ReactNode } from "react";
-import { AdminCategoriesPage, AdminDashboard, AdminLayout, AdminListingsPage, AdminReportsPage, AdminReviewsPage, AdminSettingsPage, AdminUserDetailPage, AdminUsersPage } from "./admin/AdminPages";
+import { AdminLoginPage } from "./admin/AdminLogin";
+import {
+  AdminAuditPage,
+  AdminBannersPage,
+  AdminCategoriesPage,
+  AdminCitiesPage,
+  AdminConversationsPage,
+  AdminDashboard,
+  AdminLayout,
+  AdminListingsPage,
+  AdminOffersPage,
+  AdminReportsPage,
+  AdminReviewsPage,
+  AdminSettingsPage,
+  AdminUserDetailPage,
+  AdminUsersPage,
+} from "./admin/AdminPages";
 import { Layout } from "./components/Layout";
+import { Seo } from "./components/Seo";
 import { FullSpinner } from "./components/ui";
 import { useAuth } from "./context/AuthContext";
 import { AccountPage, FavoritesPage, NotificationsPage } from "./pages/AccountPages";
@@ -12,14 +29,22 @@ import { ListingPage, SellerPage } from "./pages/ListingPage";
 import { MessagesPage } from "./pages/MessagesPage";
 import { SearchPage } from "./pages/SearchPage";
 import { AboutPage, ContactPage, PrivacyPage, RulesPage } from "./pages/StaticPages";
-import { Seo } from "./components/Seo";
 
-function Guard({ children, staff = false }: { children: ReactNode; staff?: boolean }) {
+const STAFF = ["MODERATOR", "ADMIN", "SUPER_ADMIN"];
+
+function Guard({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
   const location = useLocation();
   if (loading) return <FullSpinner />;
   if (!user) return <Navigate to={`/giris?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;
-  if (staff && !["MODERATOR", "ADMIN", "SUPER_ADMIN"].includes(user.role || "")) return <Navigate to="/" replace />;
+  return children;
+}
+
+function AdminGuard({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <FullSpinner />;
+  if (!user) return <Navigate to="/admin/giris" replace />;
+  if (!STAFF.includes(user.role || "")) return <Navigate to="/admin/giris?icaze=yox" replace />;
   return children;
 }
 
@@ -50,14 +75,21 @@ export function App() {
         <Route path="elan/:slug/redakte" element={<Guard><CreateListingPage /></Guard>} />
         <Route path="*" element={<div><Seo title="Tapılmadı" /><h1 className="text-2xl font-bold">Səhifə tapılmadı</h1></div>} />
       </Route>
-      <Route path="admin" element={<Guard staff><AdminLayout /></Guard>}>
+      <Route path="admin/giris" element={<AdminLoginPage />} />
+      <Route path="admin" element={<AdminGuard><AdminLayout /></AdminGuard>}>
         <Route index element={<AdminDashboard />} />
         <Route path="istifadeciler" element={<AdminUsersPage />} />
         <Route path="istifadeciler/:id" element={<AdminUserDetailPage />} />
         <Route path="elanlar" element={<AdminListingsPage />} />
         <Route path="kateqoriyalar" element={<AdminCategoriesPage />} />
+        <Route path="seherler" element={<AdminCitiesPage />} />
+        <Route path="bannerler" element={<AdminBannersPage />} />
         <Route path="sikayetler" element={<AdminReportsPage />} />
         <Route path="reyler" element={<AdminReviewsPage />} />
+        <Route path="yazismalar" element={<AdminConversationsPage />} />
+        <Route path="yazismalar/:id" element={<AdminConversationsPage />} />
+        <Route path="teklifler" element={<AdminOffersPage />} />
+        <Route path="jurnal" element={<AdminAuditPage />} />
         <Route path="tenzimlemeler" element={<AdminSettingsPage />} />
       </Route>
     </Routes>

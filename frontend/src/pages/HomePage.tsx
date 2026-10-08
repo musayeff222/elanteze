@@ -17,11 +17,17 @@ type HomeData = {
   categories: Category[];
 };
 
+type Banner = { id: string; title: string; imageUrl: string; link?: string | null };
+
 export function HomePage() {
   const [city, setCity] = useState(localStorage.getItem("alver_city") || "");
   const query = useQuery({
     queryKey: ["home", city],
     queryFn: () => api<HomeData>(`/api/home${city ? `?city=${city}` : ""}`),
+  });
+  const banners = useQuery({
+    queryKey: ["banners"],
+    queryFn: () => api<{ items: Banner[] }>("/api/banners"),
   });
 
   function chooseCity(slug: string) {
@@ -44,6 +50,23 @@ export function HomePage() {
           Elan yerləşdir
         </Link>
       </section>
+
+      {banners.data?.items?.length ? (
+        <section className="grid gap-3 md:grid-cols-2">
+          {banners.data.items.map((banner) => {
+            const card = (
+              <img src={banner.imageUrl} alt={banner.title} className="h-36 w-full rounded-3xl object-cover md:h-44" />
+            );
+            return banner.link ? (
+              <a key={banner.id} href={banner.link} className="block overflow-hidden rounded-3xl">
+                {card}
+              </a>
+            ) : (
+              <div key={banner.id}>{card}</div>
+            );
+          })}
+        </section>
+      ) : null}
 
       <section>
         <h2 className="mb-4 text-xl font-bold">Kateqoriyalar</h2>
