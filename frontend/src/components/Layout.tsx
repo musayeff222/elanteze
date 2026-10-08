@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
-import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
 import { useSettings } from "../context/SettingsContext";
@@ -103,6 +103,16 @@ export function Layout() {
   }
 
   const staff = user && ["MODERATOR", "ADMIN", "SUPER_ADMIN"].includes(user.role || "");
+  const location = useLocation();
+  const next = new URLSearchParams(location.search).get("next") || "";
+  const hideCategories =
+    location.pathname === "/elan-yerlesdir" ||
+    /^\/elan\/[^/]+\/redakte$/.test(location.pathname) ||
+    location.pathname === "/mesajlar" ||
+    location.pathname.startsWith("/mesajlar/") ||
+    next.startsWith("/elan-yerlesdir") ||
+    /^\/elan\/[^/]+\/redakte/.test(next) ||
+    next.startsWith("/mesajlar");
 
   return (
     <div className="min-h-screen pb-20 md:pb-0">
@@ -189,20 +199,22 @@ export function Layout() {
             <Menu />
           </button>
         </div>
-        <div className="container-app flex gap-2 overflow-x-auto pb-3">
-          {categories.map((category) => {
-            const Icon = categoryIcon(category.icon);
-            return (
-              <Link
-                key={category.id}
-                to={`/kateqoriya/${category.slug}`}
-                className="inline-flex shrink-0 items-center gap-2 rounded-full bg-paper px-3 py-1.5 text-sm font-medium hover:bg-brand-50"
-              >
-                <Icon size={16} /> {category.name}
-              </Link>
-            );
-          })}
-        </div>
+        {hideCategories ? null : (
+          <div className="container-app flex gap-2 overflow-x-auto pb-3">
+            {categories.map((category) => {
+              const Icon = categoryIcon(category.icon);
+              return (
+                <Link
+                  key={category.id}
+                  to={`/kateqoriya/${category.slug}`}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-full bg-paper px-3 py-1.5 text-sm font-medium hover:bg-brand-50"
+                >
+                  <Icon size={16} /> {category.name}
+                </Link>
+              );
+            })}
+          </div>
+        )}
       </header>
 
       {user && user.emailVerified === false && user.phoneVerified === false ? (
